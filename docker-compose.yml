@@ -1,0 +1,76 @@
+services:
+  vllm:
+    image: vllm/vllm-openai:latest
+    container_name: cera-vllm
+    ports:
+      - "${VLLM_PORT:-8100}:8000"
+    environment:
+      - HF_TOKEN=${HF_TOKEN:-}
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+      - vllm_config:/config
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    # Entrypoint: wait for dashboard to write model config, then start serving
+    entrypoint: ["/bin/bash", "-c"]
+    command:
+      - |
+        echo "[vLLM] Waiting for model configuration from dashboard..."
+        while [ ! -f /config/active_model.json ]; do
+          sleep 2
+        done
+        MODEL=$$(python3 -c "import json; print(json.load(open('/config/active_model.json'))['model'])")
+        API_KEY=$$(python3 -c "import json; print(json.load(open('/config/active_model.json')).get('api_key', ''))")
+        EXTRA=$$(python3 -c "import json; print(json.load(open('/config/active_model.json')).get('extra_args', ''))")
+        echo "[vLLM] Starting with model: $$MODEL"
+        CMD="python3 -m vllm.entrypoints.openai.api_server --model $$MODEL --host 0.0.0.0 --port 8000 --trust-remote-code --allowed-origins '*'"
+        if [ -n "$$API_KEY" ]; then
+          CMD="$$CMD --api-key $$API_KEY"
+        fi
+        if [ -n "$$EXTRA" ]; then
+          CMD="$$CMD $$EXTRA"
+        fi
+        exec $$CMD
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "bash", "-c", "curl -sf http://localhost:8000/v1/models > /dev/null 2>&1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    container_name: cera-vllm-dashboard
+    ports:
+      - "${DASHBOARD_PORT:-8101}:8101"
+    environment:
+      - DASHBOARD_PASSWORD=${DASHBOARD_PASSWORD:-changeme}
+      - HF_TOKEN=${HF_TOKEN:-}
+      - VLLM_EXTRA_ARGS=${VLLM_EXTRA_ARGS:-}
+      - VLLM_CONTAINER_NAME=cera-vllm
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+      - dashboard_data:/data
+      - vllm_config:/config
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - vllm
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:8101/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  hf_cache:          # Shared HuggingFace model cache
+  dashboard_data:    # SQLite database
+  vllm_config:       # Model config file (dashboard writes, vLLM reads)

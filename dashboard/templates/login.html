@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>cera-vLLM — Login</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="login-body">
+  <div class="login-card">
+    <h1>cera-vLLM</h1>
+    <p class="subtitle">Local LLM Management Dashboard</p>
+    {% if error %}
+    <div class="alert alert-error">{{ error }}</div>
+    {% endif %}
+    <form method="POST" action="/login">
+      <label for="password">Dashboard Password</label>
+      <input type="password" id="password" name="password" placeholder="Enter password" required autofocus>
+      <button type="submit">Sign In</button>
+    </form>
+  </div>
+</body>
+</html>

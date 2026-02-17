@@ -1,0 +1,311 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>cera-vLLM Dashboard</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header>
+    <div class="header-left">
+      <h1>cera-vLLM</h1>
+      <span class="badge" id="vllm-badge">
+        {% if vllm_status.status == 'running' %}Running{% elif vllm_status.status == 'waiting' %}Loading...{% else %}Offline{% endif %}
+      </span>
+    </div>
+    <a href="/logout" class="btn btn-sm btn-outline">Logout</a>
+  </header>
+
+  <main>
+    <!-- CERA Connection Info -->
+    <section class="card">
+      <h2>CERA Connection</h2>
+      <p class="hint">Copy these values into CERA Settings &rarr; Local LLMs</p>
+      <div class="connection-grid">
+        <div class="field-group">
+          <label>Endpoint URL</label>
+          <div class="copy-field">
+            <code id="endpoint-url">http://&lt;your-vm-ip&gt;:{{ external_port }}</code>
+            <button onclick="copyText('endpoint-url')" class="btn btn-sm">Copy</button>
+          </div>
+        </div>
+        <div class="field-group">
+          <label>API Key</label>
+          <div class="copy-field">
+            <code id="api-key-display">{{ api_key }}</code>
+            <button onclick="copyText('api-key-display')" class="btn btn-sm">Copy</button>
+            <button onclick="regenerateKey()" class="btn btn-sm btn-outline" title="Generate new key">Regenerate</button>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Live Metrics -->
+    <section class="card">
+      <h2>Live Metrics</h2>
+      <div class="metrics-grid">
+        <div class="metric">
+          <span class="metric-value" id="metric-throughput">0</span>
+          <span class="metric-label">tokens/sec</span>
+        </div>
+        <div class="metric">
+          <span class="metric-value" id="metric-running">0</span>
+          <span class="metric-label">active requests</span>
+        </div>
+        <div class="metric">
+          <span class="metric-value" id="metric-waiting">0</span>
+          <span class="metric-label">queued</span>
+        </div>
+        <div class="metric">
+          <span class="metric-value" id="metric-prompt-tokens">0</span>
+          <span class="metric-label">prompt tokens</span>
+        </div>
+        <div class="metric">
+          <span class="metric-value" id="metric-gen-tokens">0</span>
+          <span class="metric-label">completion tokens</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- GPU Info -->
+    <section class="card">
+      <h2>GPU Status</h2>
+      <div id="gpu-container">
+        {% for gpu in gpus %}
+        <div class="gpu-card">
+          <div class="gpu-header">
+            <strong>GPU {{ gpu.index }}</strong>
+            <span>{{ gpu.name }}</span>
+          </div>
+          <div class="progress-bar-container">
+            <div class="progress-bar" style="width: {{ (gpu.memory_used_mb / gpu.memory_total_mb * 100) | int }}%"></div>
+          </div>
+          <div class="gpu-stats">
+            <span>VRAM: {{ (gpu.memory_used_mb / 1024) | round(1) }} / {{ (gpu.memory_total_mb / 1024) | round(1) }} GB</span>
+            <span>Utilization: {{ gpu.utilization_pct }}%</span>
+          </div>
+        </div>
+        {% endfor %}
+        {% if not gpus %}
+        <p class="text-muted">No GPUs detected</p>
+        {% endif %}
+      </div>
+    </section>
+
+    <!-- Models -->
+    <section class="card">
+      <h2>Models</h2>
+
+      <!-- Add Custom Model -->
+      <div class="custom-model-form">
+        <input type="text" id="custom-model-input" placeholder="org/model-name (HuggingFace ID)">
+        <button onclick="addCustomModel()" class="btn btn-sm">Add Custom Model</button>
+      </div>
+
+      <table class="models-table">
+        <thead>
+          <tr>
+            <th>Model</th>
+            <th>VRAM</th>
+            <th>Speed</th>
+            <th>Quality</th>
+            <th>Status</th>
+            <th>Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for model in models %}
+          <tr id="model-row-{{ model.model_id | replace('/', '--') }}">
+            <td>
+              <div class="model-name">{{ model.display_name }}</div>
+              <div class="model-id text-muted">{{ model.model_id }}</div>
+              {% if model.requires_hf_token and not hf_token_set %}
+              <div class="text-warning">Requires HF_TOKEN</div>
+              {% endif %}
+            </td>
+            <td>{% if model.vram_gb > 0 %}~{{ model.vram_gb }} GB{% else %}Unknown{% endif %}</td>
+            <td>{{ model.speed }}</td>
+            <td>{{ model.quality }}</td>
+            <td>
+              <span class="status-badge status-{{ model.status }}" id="status-{{ model.model_id | replace('/', '--') }}">
+                {% if model.status == 'not_downloaded' %}Not Downloaded
+                {% elif model.status == 'downloading' %}Downloading {{ model.download_progress | round(0) }}%
+                {% elif model.status == 'downloaded' %}Downloaded
+                {% elif model.status == 'active' %}Active
+                {% else %}{{ model.status }}{% endif %}
+              </span>
+            </td>
+            <td class="actions-cell">
+              {% if model.status == 'not_downloaded' %}
+              <button onclick="downloadModel('{{ model.model_id }}')" class="btn btn-sm btn-primary"
+                {% if model.requires_hf_token and not hf_token_set %}disabled title="Set HF_TOKEN in .env first"{% endif %}>
+                Download
+              </button>
+              {% elif model.status == 'downloading' %}
+              <div class="progress-bar-container small">
+                <div class="progress-bar" id="progress-{{ model.model_id | replace('/', '--') }}"
+                     style="width: {{ model.download_progress }}%"></div>
+              </div>
+              {% elif model.status == 'downloaded' %}
+              <button onclick="activateModel('{{ model.model_id }}')" class="btn btn-sm btn-primary">Activate</button>
+              {% elif model.status == 'active' %}
+              <span class="text-success">Serving</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </section>
+  </main>
+
+  <script>
+    // --- Copy to clipboard ---
+    function copyText(elementId) {
+      const text = document.getElementById(elementId).textContent;
+      navigator.clipboard.writeText(text).then(() => {
+        const btn = event.target;
+        const original = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(() => btn.textContent = original, 1500);
+      });
+    }
+
+    // --- API calls ---
+    async function downloadModel(modelId) {
+      const resp = await fetch(`/api/download/${modelId}`, { method: 'POST' });
+      if (resp.ok) {
+        location.reload();
+      } else {
+        const data = await resp.json();
+        alert(data.error || 'Download failed');
+      }
+    }
+
+    async function activateModel(modelId) {
+      const btn = event.target;
+      btn.disabled = true;
+      btn.textContent = 'Activating...';
+      const resp = await fetch(`/api/activate/${modelId}`, { method: 'POST' });
+      if (resp.ok) {
+        location.reload();
+      } else {
+        const data = await resp.json();
+        alert(data.error || 'Activation failed');
+        btn.disabled = false;
+        btn.textContent = 'Activate';
+      }
+    }
+
+    async function addCustomModel() {
+      const input = document.getElementById('custom-model-input');
+      const modelId = input.value.trim();
+      if (!modelId || !modelId.includes('/')) {
+        alert('Enter a valid HuggingFace model ID (e.g., org/model-name)');
+        return;
+      }
+      const resp = await fetch('/api/add-custom', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_id: modelId }),
+      });
+      if (resp.ok) {
+        location.reload();
+      } else {
+        const data = await resp.json();
+        alert(data.error || 'Failed to add model');
+      }
+    }
+
+    async function regenerateKey() {
+      if (!confirm('Regenerate API key? You will need to update CERA Settings with the new key.')) return;
+      const resp = await fetch('/api/regenerate-key', { method: 'POST' });
+      if (resp.ok) {
+        const data = await resp.json();
+        document.getElementById('api-key-display').textContent = data.api_key;
+      }
+    }
+
+    // --- Live status polling ---
+    async function pollStatus() {
+      try {
+        const resp = await fetch('/api/status');
+        if (!resp.ok) return;
+        const data = await resp.json();
+
+        // Update vLLM badge
+        const badge = document.getElementById('vllm-badge');
+        if (data.vllm.status === 'running') {
+          badge.textContent = 'Running';
+          badge.className = 'badge badge-success';
+        } else if (data.vllm.status === 'waiting') {
+          badge.textContent = 'Loading...';
+          badge.className = 'badge badge-warning';
+        } else {
+          badge.textContent = 'Offline';
+          badge.className = 'badge badge-error';
+        }
+
+        // Update metrics
+        const m = data.metrics;
+        document.getElementById('metric-throughput').textContent = (m.throughput_tps || 0).toFixed(1);
+        document.getElementById('metric-running').textContent = m.running_requests || 0;
+        document.getElementById('metric-waiting').textContent = m.waiting_requests || 0;
+        document.getElementById('metric-prompt-tokens').textContent = formatNumber(m.prompt_tokens_total || 0);
+        document.getElementById('metric-gen-tokens').textContent = formatNumber(m.generation_tokens_total || 0);
+
+        // Update GPU bars
+        if (data.gpus && data.gpus.length > 0) {
+          const container = document.getElementById('gpu-container');
+          container.innerHTML = data.gpus.map(gpu => `
+            <div class="gpu-card">
+              <div class="gpu-header">
+                <strong>GPU ${gpu.index}</strong>
+                <span>${gpu.name}</span>
+              </div>
+              <div class="progress-bar-container">
+                <div class="progress-bar" style="width: ${Math.round(gpu.memory_used_mb / gpu.memory_total_mb * 100)}%"></div>
+              </div>
+              <div class="gpu-stats">
+                <span>VRAM: ${(gpu.memory_used_mb / 1024).toFixed(1)} / ${(gpu.memory_total_mb / 1024).toFixed(1)} GB</span>
+                <span>Utilization: ${gpu.utilization_pct}%</span>
+              </div>
+            </div>
+          `).join('');
+        }
+
+        // Update model statuses
+        for (const [modelId, info] of Object.entries(data.models)) {
+          const safeId = modelId.replace(/\//g, '--');
+          const statusEl = document.getElementById(`status-${safeId}`);
+          if (statusEl) {
+            const s = info.status;
+            statusEl.className = `status-badge status-${s}`;
+            if (s === 'downloading') {
+              statusEl.textContent = `Downloading ${Math.round(info.download_progress)}%`;
+            } else if (s === 'not_downloaded') {
+              statusEl.textContent = 'Not Downloaded';
+            } else if (s === 'downloaded') {
+              statusEl.textContent = 'Downloaded';
+            } else if (s === 'active') {
+              statusEl.textContent = 'Active';
+            }
+          }
+        }
+      } catch (e) {
+        // Silent fail on poll errors
+      }
+    }
+
+    function formatNumber(n) {
+      if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+      if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+      return n.toString();
+    }
+
+    // Poll every 3 seconds
+    setInterval(pollStatus, 3000);
+  </script>
+</body>
+</html>

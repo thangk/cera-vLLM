@@ -1,0 +1,31 @@
+# Environment
+.env
+.env.local
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+
+# Data (persisted via Docker volumes)
+*.db
+*.sqlite
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Claude
+.claude/
+CLAUDE.md
