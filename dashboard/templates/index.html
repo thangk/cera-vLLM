@@ -137,11 +137,12 @@
                 {% if model.status == 'not_downloaded' %}Not Downloaded
                 {% elif model.status == 'downloading' %}Downloading {{ model.download_progress | round(0) }}%
                 {% elif model.status == 'downloaded' %}Downloaded
+                {% elif model.status == 'loading' %}Loading...
                 {% elif model.status == 'active' %}Active
                 {% else %}{{ model.status }}{% endif %}
               </span>
             </td>
-            <td class="actions-cell">
+            <td class="actions-cell" id="actions-{{ model.model_id | replace('/', '--') }}">
               {% if model.status == 'not_downloaded' %}
               <button onclick="downloadModel('{{ model.model_id }}')" class="btn btn-sm btn-primary"
                 {% if model.requires_hf_token and not hf_token_set %}disabled title="Set HF_TOKEN in .env first"{% endif %}>
@@ -153,7 +154,12 @@
                      style="width: {{ model.download_progress }}%"></div>
               </div>
               {% elif model.status == 'downloaded' %}
-              <button onclick="activateModel('{{ model.model_id }}')" class="btn btn-sm btn-primary">Activate</button>
+              <button onclick="activateModel('{{ model.model_id }}')" class="btn btn-sm btn-primary activate-btn">Activate</button>
+              {% elif model.status == 'loading' %}
+              <div class="loading-indicator">
+                <span class="spinner"></span>
+                <span>Loading...</span>
+              </div>
               {% elif model.status == 'active' %}
               <span class="text-success">Serving</span>
               {% endif %}
@@ -225,14 +231,34 @@
       const btn = event.target;
       btn.disabled = true;
       btn.textContent = 'Activating...';
+
+      // Disable all other activate buttons
+      document.querySelectorAll('.activate-btn').forEach(b => { b.disabled = true; });
+
       const resp = await fetch(`/api/activate/${modelId}`, { method: 'POST' });
       if (resp.ok) {
-        location.reload();
+        // Update UI in-place: show loading spinner on this model
+        const safeId = modelId.replace(/\//g, '--');
+        const actionsCell = document.getElementById(`actions-${safeId}`);
+        if (actionsCell) {
+          actionsCell.innerHTML = '<div class="loading-indicator"><span class="spinner"></span><span>Loading...</span></div>';
+        }
+        const statusEl = document.getElementById(`status-${safeId}`);
+        if (statusEl) {
+          statusEl.className = 'status-badge status-loading';
+          statusEl.textContent = 'Loading...';
+        }
+        // Mark previous active model as downloaded
+        document.querySelectorAll('.status-active').forEach(el => {
+          el.className = 'status-badge status-downloaded';
+          el.textContent = 'Downloaded';
+        });
+        // Polling will auto-update to "Active" / "Serving" once vLLM confirms
       } else {
         const data = await resp.json();
         alert(data.error || 'Activation failed');
-        btn.disabled = false;
-        btn.textContent = 'Activate';
+        // Re-enable all activate buttons
+        document.querySelectorAll('.activate-btn').forEach(b => { b.disabled = false; });
       }
     }
 
@@ -350,20 +376,24 @@
           `).join('');
         }
 
-        // Update model statuses
+        // Update model statuses and action cells
+        let anyLoading = false;
         for (const [modelId, info] of Object.entries(data.models)) {
           const safeId = modelId.replace(/\//g, '--');
           const statusEl = document.getElementById(`status-${safeId}`);
           const progressEl = document.getElementById(`progress-${safeId}`);
+          const actionsCell = document.getElementById(`actions-${safeId}`);
+          const s = info.status;
+
+          if (s === 'loading') anyLoading = true;
+
           if (statusEl) {
-            const s = info.status;
             statusEl.className = `status-badge status-${s}`;
             if (s === 'downloading') {
               const pct = Math.round(info.download_progress);
               const speed = info.speed_mbps || 0;
               const speedStr = speed > 0 ? ` · ${speed.toFixed(1)} MB/s` : '';
               statusEl.textContent = `Downloading ${pct}%${speedStr}`;
-              // Update progress bar width
               if (progressEl) {
                 progressEl.style.width = `${info.download_progress}%`;
               }
@@ -371,11 +401,35 @@
               statusEl.textContent = 'Not Downloaded';
             } else if (s === 'downloaded') {
               statusEl.textContent = 'Downloaded';
+            } else if (s === 'loading') {
+              statusEl.textContent = 'Loading...';
             } else if (s === 'active') {
               statusEl.textContent = 'Active';
             }
           }
+
+          // Update action cells to match current status
+          if (actionsCell) {
+            if (s === 'loading') {
+              if (!actionsCell.querySelector('.loading-indicator')) {
+                actionsCell.innerHTML = '<div class="loading-indicator"><span class="spinner"></span><span>Loading...</span></div>';
+              }
+            } else if (s === 'active') {
+              if (!actionsCell.querySelector('.text-success')) {
+                actionsCell.innerHTML = '<span class="text-success">Serving</span>';
+              }
+            } else if (s === 'downloaded') {
+              if (!actionsCell.querySelector('.activate-btn')) {
+                actionsCell.innerHTML = `<button onclick="activateModel('${modelId}')" class="btn btn-sm btn-primary activate-btn">Activate</button>`;
+              }
+            }
+          }
         }
+
+        // Disable/enable activate buttons based on loading state
+        document.querySelectorAll('.activate-btn').forEach(b => {
+          b.disabled = anyLoading;
+        });
       } catch (e) {
         // Silent fail on poll errors
       }

@@ -545,18 +545,18 @@ async def activate_model(model_id: str, request: Request):
             "SELECT status FROM models WHERE model_id = ?", (model_id,)
         )
         row = await cursor.fetchone()
-        if not row or row["status"] not in ("downloaded", "active"):
+        if not row or row["status"] not in ("downloaded", "active", "loading"):
             return JSONResponse({"error": "Model not downloaded"}, status_code=400)
 
         api_key = await get_config(db, "api_key")
 
         # Clear previous active model
         await db.execute(
-            "UPDATE models SET status = 'downloaded' WHERE status = 'active'"
+            "UPDATE models SET status = 'downloaded' WHERE status IN ('active', 'loading')"
         )
-        # Set new active model
+        # Set new model to loading (promoted to active once vLLM confirms)
         await db.execute(
-            "UPDATE models SET status = 'active' WHERE model_id = ?", (model_id,)
+            "UPDATE models SET status = 'loading' WHERE model_id = ?", (model_id,)
         )
         await set_config(db, "active_model", model_id)
 
@@ -674,6 +674,17 @@ async def api_status(request: Request):
         db.row_factory = aiosqlite.Row
         cursor = await db.execute("SELECT model_id, status, download_progress FROM models")
         model_statuses = {row["model_id"]: dict(row) for row in await cursor.fetchall()}
+
+        # Auto-promote loading → active when vLLM confirms the model is serving
+        served_models = vllm_status.get("models", [])
+        for model_id, info in model_statuses.items():
+            if info["status"] == "loading" and model_id in served_models:
+                await db.execute(
+                    "UPDATE models SET status = 'active' WHERE model_id = ?",
+                    (model_id,),
+                )
+                await db.commit()
+                model_statuses[model_id]["status"] = "active"
 
     # Merge in-memory download progress (includes speed)
     for model_id, task in download_tasks.items():
