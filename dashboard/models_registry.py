@@ -4,11 +4,11 @@ RECOMMENDED_MODELS = [
     {
         "model_id": "Qwen/Qwen3-30B-A3B",
         "display_name": "Qwen3 30B-A3B (MoE)",
-        "vram_gb": 20,
+        "vram_gb": 60,
         "speed": "Fastest",
         "quality": "Good",
         "description": "Mixture-of-Experts model with only 3B active parameters. "
-                       "Excellent throughput for batch generation.",
+                       "All 30B params loaded in VRAM but fast inference.",
         "requires_hf_token": False,
     },
     {

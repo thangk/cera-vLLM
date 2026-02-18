@@ -182,11 +182,23 @@ def write_model_config(model_id: str, api_key: str):
     config_path.write_text(json.dumps(config, indent=2))
 
 
+async def _get_vllm_api_key() -> str:
+    """Read the API key from DB for authenticating with vLLM."""
+    try:
+        async with aiosqlite.connect(DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            return await get_config(db, "api_key")
+    except Exception:
+        return ""
+
+
 async def get_vllm_status() -> dict:
     """Check vLLM server health and get loaded models."""
     try:
+        api_key = await _get_vllm_api_key()
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.get("http://cera-vllm:8000/v1/models")
+            resp = await client.get("http://cera-vllm:8000/v1/models", headers=headers)
             if resp.status_code == 200:
                 data = resp.json()
                 models = [m["id"] for m in data.get("data", [])]
@@ -202,6 +214,7 @@ async def get_vllm_metrics() -> dict:
     """Fetch Prometheus metrics from vLLM."""
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
+            # /metrics endpoint doesn't require auth in vLLM
             resp = await client.get("http://cera-vllm:8000/metrics")
             if resp.status_code != 200:
                 return {}
