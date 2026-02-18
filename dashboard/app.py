@@ -249,12 +249,27 @@ def get_gpu_info() -> list[dict]:
 
 # --- Model Download ---
 
+def get_dir_size(path: Path) -> int:
+    """Get total size of all files in a directory tree."""
+    total = 0
+    try:
+        for entry in path.rglob("*"):
+            if entry.is_file():
+                total += entry.stat().st_size
+    except (OSError, PermissionError):
+        pass
+    return total
+
+
 def download_model_sync(model_id: str, db_path: str):
     """Download a model from HuggingFace (runs in background thread)."""
     import sqlite3
+    import time
 
-    def update_status(status: str, progress: float = 0.0):
-        download_tasks[model_id] = {"status": status, "progress": progress}
+    def update_status(status: str, progress: float = 0.0, speed_mbps: float = 0.0):
+        download_tasks[model_id] = {
+            "status": status, "progress": progress, "speed_mbps": speed_mbps,
+        }
         conn = sqlite3.connect(db_path)
         conn.execute(
             "UPDATE models SET status = ?, download_progress = ? WHERE model_id = ?",
@@ -266,12 +281,23 @@ def download_model_sync(model_id: str, db_path: str):
     try:
         update_status("downloading", 0.0)
 
+        # Fetch total expected size from model metadata
+        hf = HfApi()
+        try:
+            info = hf.model_info(model_id, files_metadata=True, token=HF_TOKEN)
+            total_bytes = sum(s.size for s in (info.siblings or []) if s.size) or 0
+        except Exception:
+            total_bytes = 0
+        print(f"[Dashboard] Model {model_id}: total size ~{total_bytes / 1e9:.1f} GB")
+
+        # HF cache path: ~/.cache/huggingface/hub/models--org--model/
+        cache_dir = Path.home() / ".cache" / "huggingface" / "hub" / f"models--{model_id.replace('/', '--')}"
+
+        # Apply speed throttle if configured
+        _orig_read = None
         if DOWNLOAD_SPEED_LIMIT:
-            # Monkey-patch urllib3 reads to throttle download bandwidth
-            import time
             import urllib3.response
             _orig_read = urllib3.response.HTTPResponse.read
-
             speed_bytes_per_sec = int(DOWNLOAD_SPEED_LIMIT) * 1024
 
             def _throttled_read(self, amt=None, **kwargs):
@@ -286,29 +312,76 @@ def download_model_sync(model_id: str, db_path: str):
                 return data
 
             urllib3.response.HTTPResponse.read = _throttled_read
-            print(f"[Dashboard] Downloading {model_id} with speed limit {DOWNLOAD_SPEED_LIMIT} KB/s")
+            print(f"[Dashboard] Speed limit: {DOWNLOAD_SPEED_LIMIT} KB/s")
 
-        snapshot_download(
-            model_id,
-            token=HF_TOKEN,
-            max_workers=1 if DOWNLOAD_SPEED_LIMIT else 4,
-        )
-        update_status("downloaded", 100.0)
+        # Run snapshot_download in a sub-thread so we can monitor progress
+        download_error = [None]
+        download_done = threading.Event()
 
-        # Restore original read if patched
-        if DOWNLOAD_SPEED_LIMIT:
+        def _do_download():
+            try:
+                snapshot_download(
+                    model_id,
+                    token=HF_TOKEN,
+                    max_workers=1 if DOWNLOAD_SPEED_LIMIT else 4,
+                )
+            except Exception as e:
+                download_error[0] = e
+            finally:
+                download_done.set()
+
+        dl_thread = threading.Thread(target=_do_download, daemon=True)
+        dl_thread.start()
+
+        # Monitor progress by watching cache directory size
+        last_bytes = get_dir_size(cache_dir) if cache_dir.exists() else 0
+        last_time = time.monotonic()
+
+        while not download_done.is_set():
+            download_done.wait(timeout=3)
+            if download_done.is_set():
+                break
+
+            current_bytes = get_dir_size(cache_dir) if cache_dir.exists() else 0
+            now = time.monotonic()
+
+            # Progress percentage
+            if total_bytes > 0:
+                progress = min(current_bytes / total_bytes * 100, 99.9)
+            else:
+                progress = 0.0
+
+            # Speed (MB/s)
+            dt = now - last_time
+            speed_mbps = ((current_bytes - last_bytes) / dt / (1024 * 1024)) if dt > 0 else 0.0
+
+            last_bytes = current_bytes
+            last_time = now
+
+            update_status("downloading", round(progress, 1), round(speed_mbps, 1))
+
+        # Restore urllib3 if patched
+        if _orig_read is not None:
+            import urllib3.response
             urllib3.response.HTTPResponse.read = _orig_read
+
+        if download_error[0]:
+            raise download_error[0]
+
+        update_status("downloaded", 100.0)
+        print(f"[Dashboard] Download complete: {model_id}")
+
     except Exception as e:
         print(f"[Dashboard] Download failed for {model_id}: {e}")
-        # Restore original read on error too
-        if DOWNLOAD_SPEED_LIMIT:
+        if _orig_read is not None:
             try:
+                import urllib3.response
                 urllib3.response.HTTPResponse.read = _orig_read
-            except NameError:
+            except Exception:
                 pass
         update_status("not_downloaded", 0.0)
         download_tasks[model_id] = {
-            "status": "error", "progress": 0.0, "error": str(e)
+            "status": "error", "progress": 0.0, "speed_mbps": 0.0, "error": str(e),
         }
 
 
@@ -510,10 +583,19 @@ async def search_hf_models(request: Request, q: str = ""):
         )
         results = []
         for m in models:
+            # Estimate size from safetensors parameter count (2 bytes/param for BF16)
+            size_bytes = None
+            params = None
+            if getattr(m, "safetensors", None) and isinstance(m.safetensors, dict):
+                params = m.safetensors.get("total", None)
+                if params:
+                    size_bytes = params * 2  # BF16/FP16 = 2 bytes per param
             results.append({
                 "id": m.id,
                 "downloads": m.downloads or 0,
                 "likes": m.likes or 0,
+                "size_bytes": size_bytes,
+                "params": params,
             })
         return JSONResponse({"results": results})
     except Exception as e:
@@ -557,11 +639,12 @@ async def api_status(request: Request):
         cursor = await db.execute("SELECT model_id, status, download_progress FROM models")
         model_statuses = {row["model_id"]: dict(row) for row in await cursor.fetchall()}
 
-    # Merge in-memory download progress
+    # Merge in-memory download progress (includes speed)
     for model_id, task in download_tasks.items():
         if model_id in model_statuses:
             model_statuses[model_id]["status"] = task["status"]
             model_statuses[model_id]["download_progress"] = task.get("progress", 0.0)
+            model_statuses[model_id]["speed_mbps"] = task.get("speed_mbps", 0.0)
 
     return JSONResponse({
         "vllm": vllm_status,

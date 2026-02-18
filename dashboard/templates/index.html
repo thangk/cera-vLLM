@@ -234,7 +234,7 @@
         dropdown.innerHTML = data.results.map(m => `
           <div class="search-item" onclick="selectSearchResult('${m.id}')">
             <span class="search-model-id">${m.id}</span>
-            <span class="search-meta">${formatNumber(m.downloads)} downloads · ${m.likes} likes</span>
+            <span class="search-meta">${m.size_bytes ? formatBytes(m.size_bytes) + ' · ' : ''}${formatNumber(m.downloads)} downloads · ${m.likes} likes</span>
           </div>
         `).join('');
         dropdown.style.display = 'block';
@@ -334,11 +334,19 @@
         for (const [modelId, info] of Object.entries(data.models)) {
           const safeId = modelId.replace(/\//g, '--');
           const statusEl = document.getElementById(`status-${safeId}`);
+          const progressEl = document.getElementById(`progress-${safeId}`);
           if (statusEl) {
             const s = info.status;
             statusEl.className = `status-badge status-${s}`;
             if (s === 'downloading') {
-              statusEl.textContent = `Downloading ${Math.round(info.download_progress)}%`;
+              const pct = Math.round(info.download_progress);
+              const speed = info.speed_mbps || 0;
+              const speedStr = speed > 0 ? ` · ${speed.toFixed(1)} MB/s` : '';
+              statusEl.textContent = `Downloading ${pct}%${speedStr}`;
+              // Update progress bar width
+              if (progressEl) {
+                progressEl.style.width = `${info.download_progress}%`;
+              }
             } else if (s === 'not_downloaded') {
               statusEl.textContent = 'Not Downloaded';
             } else if (s === 'downloaded') {
@@ -357,6 +365,13 @@
       if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
       if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
       return n.toString();
+    }
+
+    function formatBytes(bytes) {
+      if (bytes >= 1e12) return (bytes / 1e12).toFixed(1) + ' TB';
+      if (bytes >= 1e9) return (bytes / 1e9).toFixed(1) + ' GB';
+      if (bytes >= 1e6) return (bytes / 1e6).toFixed(1) + ' MB';
+      return (bytes / 1e3).toFixed(0) + ' KB';
     }
 
     // Poll every 3 seconds
