@@ -6,6 +6,7 @@ import os
 import secrets
 import subprocess
 import threading
+import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -197,7 +198,7 @@ async def get_vllm_status() -> dict:
     try:
         api_key = await _get_vllm_api_key()
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else {}
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.get("http://cera-vllm:8000/v1/models", headers=headers)
             if resp.status_code == 200:
                 data = resp.json()
@@ -206,14 +207,23 @@ async def get_vllm_status() -> dict:
             return {"status": "error", "models": [], "error": f"HTTP {resp.status_code}"}
     except httpx.ConnectError:
         return {"status": "waiting", "models": [], "error": "Waiting for vLLM to start..."}
+    except (httpx.ReadTimeout, httpx.WriteTimeout, httpx.PoolTimeout):
+        # Timeout under heavy load — vLLM is still running, just busy
+        return {"status": "running", "models": [], "error": "Server busy (timeout)"}
     except Exception as e:
         return {"status": "error", "models": [], "error": str(e)}
 
 
+# State for computing tokens/sec from counter deltas
+_prev_gen_tokens: float = 0.0
+_prev_gen_time: float = 0.0
+
+
 async def get_vllm_metrics() -> dict:
-    """Fetch Prometheus metrics from vLLM."""
+    """Fetch Prometheus metrics from vLLM and compute throughput."""
+    global _prev_gen_tokens, _prev_gen_time
     try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
+        async with httpx.AsyncClient(timeout=10.0) as client:
             # /metrics endpoint doesn't require auth in vLLM
             resp = await client.get("http://cera-vllm:8000/metrics")
             if resp.status_code != 200:
@@ -231,6 +241,19 @@ async def get_vllm_metrics() -> dict:
                         metrics[name] = float(parts[-1])
                     except ValueError:
                         pass
+
+            # Compute tokens/sec from generation_tokens_total delta
+            now = time.time()
+            gen_tokens = metrics.get("vllm:generation_tokens_total", 0)
+            if _prev_gen_time > 0 and now > _prev_gen_time:
+                dt = now - _prev_gen_time
+                delta = gen_tokens - _prev_gen_tokens
+                metrics["_computed_throughput_tps"] = max(0, delta / dt)
+            else:
+                metrics["_computed_throughput_tps"] = 0
+            _prev_gen_tokens = gen_tokens
+            _prev_gen_time = now
+
             return metrics
     except Exception:
         return {}
@@ -662,7 +685,7 @@ async def api_status(request: Request):
     return JSONResponse({
         "vllm": vllm_status,
         "metrics": {
-            "throughput_tps": metrics.get("vllm:avg_generation_throughput_toks_per_s", 0),
+            "throughput_tps": metrics.get("_computed_throughput_tps", 0),
             "running_requests": metrics.get("vllm:num_requests_running", 0),
             "waiting_requests": metrics.get("vllm:num_requests_waiting", 0),
             "prompt_tokens_total": metrics.get("vllm:prompt_tokens_total", 0),

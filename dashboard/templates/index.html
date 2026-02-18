@@ -29,7 +29,7 @@
         <div class="field-group">
           <label>Endpoint URL</label>
           <div class="copy-field">
-            <code id="endpoint-url">http://&lt;your-vm-ip&gt;:{{ external_port }}</code>
+            <code id="endpoint-url"></code>
             <button onclick="copyText('endpoint-url')" class="btn btn-sm">Copy</button>
           </div>
         </div>
@@ -179,15 +179,35 @@
     }
     applyTheme(localStorage.getItem('cera-vllm-theme') || 'dark');
 
-    // --- Copy to clipboard ---
+    // --- Auto-detect endpoint URL from current host ---
+    (function() {
+      const host = window.location.hostname;
+      const endpointUrl = 'http://' + host + ':{{ external_port }}';
+      document.getElementById('endpoint-url').textContent = endpointUrl;
+    })();
+
+    // --- Copy to clipboard (works over HTTP too) ---
     function copyText(elementId) {
       const text = document.getElementById(elementId).textContent;
-      navigator.clipboard.writeText(text).then(() => {
-        const btn = event.target;
-        const original = btn.textContent;
-        btn.textContent = 'Copied!';
-        setTimeout(() => btn.textContent = original, 1500);
-      });
+      if (navigator.clipboard && window.isSecureContext) {
+        navigator.clipboard.writeText(text).then(() => showCopied(event.target));
+      } else {
+        // Fallback for HTTP: use a temporary textarea
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.left = '-9999px';
+        document.body.appendChild(ta);
+        ta.select();
+        document.execCommand('copy');
+        document.body.removeChild(ta);
+        showCopied(event.target);
+      }
+    }
+    function showCopied(btn) {
+      const original = btn.textContent;
+      btn.textContent = 'Copied!';
+      setTimeout(() => btn.textContent = original, 1500);
     }
 
     // --- API calls ---
