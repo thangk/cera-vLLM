@@ -69,6 +69,9 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu]
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     depends_on:
       - vllm
     restart: unless-stopped
