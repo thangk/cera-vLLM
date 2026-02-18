@@ -28,6 +28,9 @@ HF_TOKEN = os.environ.get("HF_TOKEN", "") or None
 VLLM_EXTRA_ARGS = os.environ.get("VLLM_EXTRA_ARGS", "")
 VLLM_CONTAINER_NAME = os.environ.get("VLLM_CONTAINER_NAME", "cera-vllm")
 DOWNLOAD_SPEED_LIMIT = os.environ.get("DOWNLOAD_SPEED_LIMIT", "")  # KB/s, e.g. "50000" for ~50 MB/s
+if DOWNLOAD_SPEED_LIMIT:
+    # Disable hf_transfer (Rust fast downloader) so urllib3 throttle works
+    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
 CONFIG_DIR = Path("/config")
 DATA_DIR = Path("/data")
 DB_PATH = DATA_DIR / "dashboard.db"
@@ -288,6 +291,7 @@ def download_model_sync(model_id: str, db_path: str):
         snapshot_download(
             model_id,
             token=HF_TOKEN,
+            max_workers=1 if DOWNLOAD_SPEED_LIMIT else 4,
         )
         update_status("downloaded", 100.0)
 
