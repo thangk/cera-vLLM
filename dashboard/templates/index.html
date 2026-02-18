@@ -14,7 +14,10 @@
         {% if vllm_status.status == 'running' %}Running{% elif vllm_status.status == 'waiting' %}Loading...{% else %}Offline{% endif %}
       </span>
     </div>
-    <a href="/logout" class="btn btn-sm btn-outline">Logout</a>
+    <div class="header-actions">
+      <button class="theme-toggle" onclick="toggleTheme()" id="theme-btn" title="Toggle theme"></button>
+      <a href="/logout" class="btn btn-sm btn-outline">Logout</a>
+    </div>
   </header>
 
   <main>
@@ -97,10 +100,12 @@
     <section class="card">
       <h2>Models</h2>
 
-      <!-- Add Custom Model -->
-      <div class="custom-model-form">
-        <input type="text" id="custom-model-input" placeholder="org/model-name (HuggingFace ID)">
-        <button onclick="addCustomModel()" class="btn btn-sm">Add Custom Model</button>
+      <!-- Search & Add Model -->
+      <div class="custom-model-form" style="position: relative;">
+        <input type="text" id="custom-model-input" placeholder="Search HuggingFace models..." autocomplete="off"
+               oninput="searchModels(this.value)">
+        <button onclick="addCustomModel()" class="btn btn-sm">Add Model</button>
+        <div id="search-results" class="search-dropdown" style="display: none;"></div>
       </div>
 
       <table class="models-table">
@@ -161,6 +166,19 @@
   </main>
 
   <script>
+    // --- Theme ---
+    function applyTheme(theme) {
+      document.documentElement.setAttribute('data-theme', theme);
+      document.getElementById('theme-btn').textContent = theme === 'dark' ? '\u2600' : '\u263E';
+    }
+    function toggleTheme() {
+      const current = document.documentElement.getAttribute('data-theme') || 'dark';
+      const next = current === 'dark' ? 'light' : 'dark';
+      localStorage.setItem('cera-vllm-theme', next);
+      applyTheme(next);
+    }
+    applyTheme(localStorage.getItem('cera-vllm-theme') || 'dark');
+
     // --- Copy to clipboard ---
     function copyText(elementId) {
       const text = document.getElementById(elementId).textContent;
@@ -197,6 +215,43 @@
         btn.textContent = 'Activate';
       }
     }
+
+    // --- HuggingFace Search ---
+    let searchTimeout = null;
+    function searchModels(query) {
+      clearTimeout(searchTimeout);
+      const dropdown = document.getElementById('search-results');
+      if (query.length < 2) { dropdown.style.display = 'none'; return; }
+      searchTimeout = setTimeout(async () => {
+        const resp = await fetch(`/api/search-models?q=${encodeURIComponent(query)}`);
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (!data.results.length) {
+          dropdown.innerHTML = '<div class="search-item text-muted">No models found</div>';
+          dropdown.style.display = 'block';
+          return;
+        }
+        dropdown.innerHTML = data.results.map(m => `
+          <div class="search-item" onclick="selectSearchResult('${m.id}')">
+            <span class="search-model-id">${m.id}</span>
+            <span class="search-meta">${formatNumber(m.downloads)} downloads · ${m.likes} likes</span>
+          </div>
+        `).join('');
+        dropdown.style.display = 'block';
+      }, 300);
+    }
+
+    function selectSearchResult(modelId) {
+      document.getElementById('custom-model-input').value = modelId;
+      document.getElementById('search-results').style.display = 'none';
+    }
+
+    // Close dropdown when clicking outside
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.custom-model-form')) {
+        document.getElementById('search-results').style.display = 'none';
+      }
+    });
 
     async function addCustomModel() {
       const input = document.getElementById('custom-model-input');

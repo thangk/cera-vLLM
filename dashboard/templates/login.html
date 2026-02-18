@@ -19,5 +19,9 @@
       <button type="submit">Sign In</button>
     </form>
   </div>
+  <script>
+    const theme = localStorage.getItem('cera-vllm-theme') || 'dark';
+    document.documentElement.setAttribute('data-theme', theme);
+  </script>
 </body>
 </html>
