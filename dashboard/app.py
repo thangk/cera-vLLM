@@ -16,7 +16,7 @@ from fastapi import FastAPI, Request, Form, Depends, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from huggingface_hub import snapshot_download
+from huggingface_hub import snapshot_download, HfApi
 from itsdangerous import URLSafeTimedSerializer
 
 from models_registry import RECOMMENDED_MODELS
@@ -264,31 +264,44 @@ def download_model_sync(model_id: str, db_path: str):
         update_status("downloading", 0.0)
 
         if DOWNLOAD_SPEED_LIMIT:
-            # Use trickle to limit download bandwidth (keeps SSH responsive)
-            cmd = ["trickle", "-s", "-d", DOWNLOAD_SPEED_LIMIT,
-                   "python3", "download_worker.py", model_id, str(db_path)]
+            # Monkey-patch urllib3 reads to throttle download bandwidth
+            import time
+            import urllib3.response
+            _orig_read = urllib3.response.HTTPResponse.read
+
+            speed_bytes_per_sec = int(DOWNLOAD_SPEED_LIMIT) * 1024
+
+            def _throttled_read(self, amt=None, **kwargs):
+                chunk_size = min(amt or 65536, 65536)
+                start = time.monotonic()
+                data = _orig_read(self, amt=chunk_size, **kwargs)
+                if data and speed_bytes_per_sec > 0:
+                    expected = len(data) / speed_bytes_per_sec
+                    elapsed = time.monotonic() - start
+                    if elapsed < expected:
+                        time.sleep(expected - elapsed)
+                return data
+
+            urllib3.response.HTTPResponse.read = _throttled_read
             print(f"[Dashboard] Downloading {model_id} with speed limit {DOWNLOAD_SPEED_LIMIT} KB/s")
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
-            if result.returncode != 0:
-                raise RuntimeError(result.stderr or "Download worker failed")
-            # Parse final status from worker stdout
-            for line in reversed(result.stdout.strip().splitlines()):
-                try:
-                    msg = json.loads(line)
-                    if msg.get("status") == "error":
-                        raise RuntimeError(msg.get("error", "Unknown error"))
-                    break
-                except json.JSONDecodeError:
-                    continue
-            update_status("downloaded", 100.0)
-        else:
-            snapshot_download(
-                model_id,
-                token=HF_TOKEN,
-            )
-            update_status("downloaded", 100.0)
+
+        snapshot_download(
+            model_id,
+            token=HF_TOKEN,
+        )
+        update_status("downloaded", 100.0)
+
+        # Restore original read if patched
+        if DOWNLOAD_SPEED_LIMIT:
+            urllib3.response.HTTPResponse.read = _orig_read
     except Exception as e:
         print(f"[Dashboard] Download failed for {model_id}: {e}")
+        # Restore original read on error too
+        if DOWNLOAD_SPEED_LIMIT:
+            try:
+                urllib3.response.HTTPResponse.read = _orig_read
+            except NameError:
+                pass
         update_status("not_downloaded", 0.0)
         download_tasks[model_id] = {
             "status": "error", "progress": 0.0, "error": str(e)
@@ -471,6 +484,36 @@ async def add_custom_model(request: Request):
         await db.commit()
 
     return JSONResponse({"status": "added"})
+
+
+@app.get("/api/search-models")
+async def search_hf_models(request: Request, q: str = ""):
+    """Search HuggingFace Hub for text-generation models."""
+    if not verify_session(request):
+        raise HTTPException(status_code=401)
+
+    if not q or len(q) < 2:
+        return JSONResponse({"results": []})
+
+    try:
+        hf = HfApi()
+        models = hf.list_models(
+            search=q,
+            pipeline_tag="text-generation",
+            sort="downloads",
+            direction=-1,
+            limit=10,
+        )
+        results = []
+        for m in models:
+            results.append({
+                "id": m.id,
+                "downloads": m.downloads or 0,
+                "likes": m.likes or 0,
+            })
+        return JSONResponse({"results": results})
+    except Exception as e:
+        return JSONResponse({"results": [], "error": str(e)})
 
 
 @app.post("/api/regenerate-key")
