@@ -56,11 +56,19 @@ services:
       - HF_TOKEN=${HF_TOKEN:-}
       - VLLM_EXTRA_ARGS=${VLLM_EXTRA_ARGS:-}
       - VLLM_CONTAINER_NAME=cera-vllm
+      - DOWNLOAD_SPEED_LIMIT=${DOWNLOAD_SPEED_LIMIT:-}
     volumes:
       - hf_cache:/root/.cache/huggingface
       - dashboard_data:/data
       - vllm_config:/config
       - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
     depends_on:
       - vllm
     restart: unless-stopped

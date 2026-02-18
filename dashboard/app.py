@@ -27,6 +27,7 @@ DASHBOARD_PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "changeme")
 HF_TOKEN = os.environ.get("HF_TOKEN", "") or None
 VLLM_EXTRA_ARGS = os.environ.get("VLLM_EXTRA_ARGS", "")
 VLLM_CONTAINER_NAME = os.environ.get("VLLM_CONTAINER_NAME", "cera-vllm")
+DOWNLOAD_SPEED_LIMIT = os.environ.get("DOWNLOAD_SPEED_LIMIT", "")  # KB/s, e.g. "50000" for ~50 MB/s
 CONFIG_DIR = Path("/config")
 DATA_DIR = Path("/data")
 DB_PATH = DATA_DIR / "dashboard.db"
@@ -261,12 +262,31 @@ def download_model_sync(model_id: str, db_path: str):
 
     try:
         update_status("downloading", 0.0)
-        snapshot_download(
-            model_id,
-            token=HF_TOKEN,
-            # huggingface_hub handles progress internally
-        )
-        update_status("downloaded", 100.0)
+
+        if DOWNLOAD_SPEED_LIMIT:
+            # Use trickle to limit download bandwidth (keeps SSH responsive)
+            cmd = ["trickle", "-s", "-d", DOWNLOAD_SPEED_LIMIT,
+                   "python3", "download_worker.py", model_id, str(db_path)]
+            print(f"[Dashboard] Downloading {model_id} with speed limit {DOWNLOAD_SPEED_LIMIT} KB/s")
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=7200)
+            if result.returncode != 0:
+                raise RuntimeError(result.stderr or "Download worker failed")
+            # Parse final status from worker stdout
+            for line in reversed(result.stdout.strip().splitlines()):
+                try:
+                    msg = json.loads(line)
+                    if msg.get("status") == "error":
+                        raise RuntimeError(msg.get("error", "Unknown error"))
+                    break
+                except json.JSONDecodeError:
+                    continue
+            update_status("downloaded", 100.0)
+        else:
+            snapshot_download(
+                model_id,
+                token=HF_TOKEN,
+            )
+            update_status("downloaded", 100.0)
     except Exception as e:
         print(f"[Dashboard] Download failed for {model_id}: {e}")
         update_status("not_downloaded", 0.0)

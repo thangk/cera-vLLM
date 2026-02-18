@@ -2,9 +2,10 @@ FROM python:3.11-slim
 
 WORKDIR /app
 
-# System deps for nvidia-smi and curl
+# System deps for nvidia-smi, curl, and bandwidth limiting
 RUN apt-get update && apt-get install -y --no-install-recommends \
     curl \
+    trickle \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python dependencies
